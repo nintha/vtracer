@@ -1,9 +1,9 @@
 # vtracer
 B站视频追踪
-
+https://github.com/uupers/vtracer/settings
 Demo: http://45.32.68.44:16201/
 
-
+=======
 ## FAQ
         Q: 这个网站是干嘛的？
         A: 本站提供对Bilibili弹幕网中部分UP及其视频进行信息追踪功能。
@@ -18,4 +18,3 @@ Demo: http://45.32.68.44:16201/
 
         Q: 网站已经半天没有新的跟踪数据了怎么办/网站好像卡住了？
         A: 由于VPS性能有限，的确会出现卡顿/追踪停止的情况，可以在群里大喊“vtracer又挂了！”。
-
