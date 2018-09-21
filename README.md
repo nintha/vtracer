@@ -1,6 +1,5 @@
 # vtracer
 B站视频追踪
-https://github.com/uupers/vtracer/settings
 Demo: http://45.32.68.44:16201/
 
 =======
