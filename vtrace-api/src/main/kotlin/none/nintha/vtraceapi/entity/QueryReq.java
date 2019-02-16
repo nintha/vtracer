@@ -2,6 +2,8 @@ package none.nintha.vtraceapi.entity;
 
 import none.nintha.vtraceapi.util.CommonUtil;
 import org.apache.logging.log4j.util.Strings;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
 
@@ -9,12 +11,15 @@ import org.springframework.data.mongodb.core.query.Query;
  * 混合查询类
  */
 public class QueryReq {
+    private static final Logger logger = LoggerFactory.getLogger(QueryReq.class);
     int pageNum = 1;
     int pageSize = 20;
 
     String title;
     String name;
     Integer keep;
+    Integer mini;
+    Long mid; // for video filter
 
     public QueryReq(int pageNum, int pageSize) {
         this.pageNum = pageNum;
@@ -76,6 +81,26 @@ public class QueryReq {
         this.keep = keep;
     }
 
+    public Integer getMini() {
+        return mini;
+    }
+
+    public void setMini(Integer mini) {
+        this.mini = mini;
+    }
+
+    public Long getMid() {
+        return mid;
+    }
+
+    public void setMid(Long mid) {
+        this.mid = mid;
+    }
+
+    /**
+     * 构建mongo 查询条件
+     * @return
+     */
     public Query toQuery() {
         Criteria criteria = new Criteria();
         if (Strings.isNotBlank(title)) {
@@ -93,11 +118,19 @@ public class QueryReq {
         if (keep != null) {
             criteria.and("keep").is(keep);
         }
+        if (mini != null){
+            criteria.and("mini").is(mini);
+        }
+        if (mid != null){
+            criteria.and("mid").is(mid);
+        }
         if (this.getLimit() == 0) {
             return new Query(criteria);
         }
 
         Query rs = new Query(criteria).limit(this.getLimit()).skip(this.getSkip());
+
+        logger.debug("ToQuery#{}",rs);
         return rs;
     }
 }

@@ -12,11 +12,9 @@ import org.springframework.web.bind.annotation.*
 import java.time.Instant
 import java.time.LocalDateTime
 import java.util.*
-import javax.validation.constraints.Null
 
 @Api(tags=["Trace"])
 @RestController
-@RequestMapping("api/v1")
 class TraceController {
     @Autowired
     lateinit var tracerService: TracerService
@@ -96,6 +94,12 @@ class TraceController {
         return Results.success(mapOf("effect" to effect))
     }
 
+    @PutMapping("/trace/member/{mid}/mini/{mini}")
+    fun updateMiniStatus(@PathVariable mid: Long, @PathVariable mini: Int): Any {
+        val effect = tracerService.updateMemberMiniStatus(mid, mini)
+        return Results.success(mapOf("effect" to effect))
+    }
+
     @DeleteMapping("/trace/member/{mid}")
     fun removeTraceMember(@PathVariable mid: Long): Any {
         val effect = tracerService.removeTraceMember(mid)
@@ -103,16 +107,16 @@ class TraceController {
     }
 
     //  测试用户爬取功能
-    @GetMapping("/test/task/member")
-    fun testTraceMember(): Results<Null> {
-        tracerTask.memberLoop()
-        return Results.success()
-    }
+//    @GetMapping("/test/task/member")
+//    fun testTraceMember(): Results<Null> {
+//        tracerTask.memberLoop()
+//        return Results.success()
+//    }
 
     //  测试视频爬取功能
-    @GetMapping("/test/task/video")
-    fun testTraceVideo(): Results<Null> {
-        tracerTask.videoLoop()
-        return Results.success()
-    }
+//    @GetMapping("/test/task/video")
+//    fun testTraceVideo(): Results<Null> {
+//        tracerTask.videoLoop()
+//        return Results.success()
+//    }
 }

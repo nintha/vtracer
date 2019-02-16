@@ -6,6 +6,7 @@ import Util from './libs/util'
 import App from './app.vue'
 import 'iview/dist/styles/iview.css'
 import Api from './api/index.js'
+import "core-js/fn/array/flat-map";
 
 Vue.prototype.$api = Api
 Vue.use(VueRouter)

@@ -7,6 +7,7 @@ public class TraceMember {
     private String name;
     private String face;
     private Integer keep = 0;
+    private Integer mini = 0; // 迷你追踪模式，只追踪部分数据
     private Date ctime;
 
     public long getMid() {
@@ -47,5 +48,13 @@ public class TraceMember {
 
     public void setKeep(Integer keep) {
         this.keep = keep;
+    }
+
+    public Integer getMini() {
+        return mini == null ? 0 :mini;
+    }
+
+    public void setMini(Integer mini) {
+        this.mini = mini;
     }
 }

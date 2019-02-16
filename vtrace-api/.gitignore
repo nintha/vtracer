@@ -3,6 +3,7 @@
 *.zip
 *.csv
 !gradle/wrapper/gradle-wrapper.jar
+/storage/
 
 ### STS ###
 .apt_generated

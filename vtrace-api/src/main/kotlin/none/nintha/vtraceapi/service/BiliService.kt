@@ -1,19 +1,18 @@
 package none.nintha.vtraceapi.service
 
-import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.mongodb.WriteConcern
-import none.nintha.vtraceapi.config.asBean
-import none.nintha.vtraceapi.entity.Member
 import none.nintha.vtraceapi.entity.PartCard
-import none.nintha.vtraceapi.entity.consts.TaskMode
+import none.nintha.vtraceapi.entity.TraceTaskResult
 import none.nintha.vtraceapi.spider.FetchTask
 import none.nintha.vtraceapi.spider.Nest
 import none.nintha.vtraceapi.spider.Spider
 import none.nintha.vtraceapi.spider.TableNames
 import none.nintha.vtraceapi.util.HttpSender
+import none.nintha.vtraceapi.util.TimeUtil
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+import org.springframework.beans.BeanUtils
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.data.domain.Sort
@@ -21,11 +20,12 @@ import org.springframework.data.mongodb.core.MongoTemplate
 import org.springframework.data.mongodb.core.index.Index
 import org.springframework.data.mongodb.core.query.Criteria
 import org.springframework.data.mongodb.core.query.Query
-import org.springframework.data.mongodb.core.query.Update
 import org.springframework.stereotype.Service
 import org.springframework.util.CollectionUtils
+import org.springframework.util.StringUtils
 import java.nio.file.Files
 import java.nio.file.Paths
+import java.time.LocalDateTime
 import java.util.*
 import java.util.concurrent.CompletableFuture
 import java.util.function.Supplier
@@ -37,156 +37,225 @@ import java.util.zip.ZipOutputStream
 class BiliService {
     companion object {
         private val logger: Logger = LoggerFactory.getLogger(BiliService::class.java)
+        private const val QUERY_LIMIT = 1000
         const val POST_MEMBER_API = "http://space.bilibili.com/ajax/member/GetInfo"
         const val GET_CARD_API = "http://api.bilibili.com/x/web-interface/card" // ?mid={mid}
         val sexMap: Map<String, Int> = mapOf("男" to 0, "女" to 1, "保密" to 2)
         var taskStatus: Int = 0 // 0-stopped, 1-running, 2-exporting, 3-stopping, 4-scheduled
-        var taskThread: Thread? = null
-        var taskMode: TaskMode = TaskMode.IN_MEMORY
 
-        const val apiType = 0 // 0-GET:PartCard, 1-POST:Member
         const val zipFileName = "result.zip"
-        const val csvFileName = "result.csv"
+        const val ABNORMAL_FANS_VALUE = 400 // top用户爬取时，fans低于这个值作为异常数据
         var defaultTaskId: Long = 0
     }
 
     @Autowired
     lateinit var mongoTemplate: MongoTemplate
     @Autowired
+    lateinit var biliFetcher: BiliFetcher
+    @Autowired
+    lateinit var mailService: MailService
+    @Autowired
     lateinit var mapper: ObjectMapper
-    @Value("@{spider.task-package-size:1000}")
-    var packageSize: Int = 1000
-    @Value("@{mongo.export-command}")
-    lateinit var exportCommand: String
 
-    fun stop() {
-        logger.info("[Run task] try to stop")
-        if (taskStatus == 1) taskStatus = 3
-    }
+    @Value("@{vtarce.task-watcher.emails}")
+    lateinit var taskWatcherEmails: String
 
-    fun runNormalAsync() {
-        if(taskMode != TaskMode.NORMAL){
-            logger.warn("[Run task] mode not match, current mode is $taskMode")
-            return
-        }
-        taskThread = Thread(this::runNormalTask).also { it.start() }
-    }
 
-    fun runInMemoryTask() {
-        if(taskMode != TaskMode.IN_MEMORY){
-            logger.warn("[Run task] mode not match, current mode is $taskMode")
-            return
-        }
-        defaultTaskId = Date().time
-        logger.info("[Run task In Memory] start.")
+    /**
+     * 执行一次任务(任务内容一次性读到内存中),并发送结果邮件
+     * @return 本次任务ID
+     */
+    fun runInMemoryTask(): Long {
+        // 取整到小时
+        defaultTaskId = TimeUtil.toDate(LocalDateTime.now().withSecond(0).withNano(0)).time
+        logger.info("[Run task In Memory] start, taskId=$defaultTaskId.")
+
+        val fetchFunc = this::fetchTraceTaskResult
+        val idMapper = TraceTaskResult::mid
+
         val tasks = mongoTemplate.findAll(FetchTask::class.java, TableNames.MONGO_TRACE_TASK_TIEM)
-        var remainMids = tasks.asSequence().map { it.mid }.toMutableSet()
+        var remainMids: MutableSet<Long> = tasks.asSequence().map { it.mid }.toMutableSet()
         while (true) {
-            val finishedMids = handleTask(remainMids.map { FetchTask(it) }, this::fetchCard, PartCard::mid)
+            val finishedMids = handleTask(remainMids.map { FetchTask(it) }, fetchFunc, idMapper)
 
             logger.info("[Run task In Memory] ${finishedMids.size}/${remainMids.size}")
             remainMids.removeAll(finishedMids)
             if (remainMids.isEmpty()) break
         }
-        logger.info("[Run task In Memory] done.")
+
+        // 等待mongo数据缓存同步
+        Thread.sleep(10_000)
+
+        // 异常错误处理
+        for (times in (1..4)) {
+            val pairs = getUnexpectPairs(defaultTaskId)
+            remainMids = pairs.map { it.first }.toMutableSet()
+            logger.info("[Run task In Memory] #$times handle abnormal data, taskId=$defaultTaskId, size=${pairs.size}, detail=$pairs")
+            if(remainMids.isEmpty()) break
+
+            // remove abnormal results
+            val removeQuery = Query(Criteria.where("taskId").`is`(defaultTaskId).and("mid").`in`(remainMids))
+            mongoTemplate.remove(removeQuery, TableNames.MONGO_TRACE_TASK_RESULT)
+            while (true) {
+                if (remainMids.isEmpty()) break
+                val finishedMids = handleTask(remainMids.map { FetchTask(it) }, fetchFunc, idMapper)
+
+                logger.info("[Run task In Memory] #$times retry , ${finishedMids.size}/${remainMids.size}")
+                remainMids.removeAll(finishedMids)
+            }
+            Thread.sleep(2_000)
+        }
+
+        CompletableFuture.runAsync {
+            // 等待mongo数据缓存同步
+            Thread.sleep(20_000)
+            val results = queryResultByTaskId(defaultTaskId, tasks.size)
+            logger.info("[Run task In Memory] done, result/task=${results.size}/${tasks.size}.")
+            sendTaskResultEmail(results, tasks.size.toLong())
+        }
+        return defaultTaskId
     }
 
-    private fun runNormalTask() {
-        if (taskStatus >= 1) return
+    fun queryResultByTaskId(taskId: Long, taskSize: Int): List<TraceTaskResult> {
+        val rslist: MutableList<TraceTaskResult> = mutableListOf();
+        val maxPage = taskSize / QUERY_LIMIT + if (taskSize % QUERY_LIMIT == 0) 0 else 1
+        logger.info("[queryResultByTaskId] Args: maxPage=$maxPage, queryLimit=$QUERY_LIMIT, taskId=$taskId, taskSize=$taskSize")
 
-        logger.info("[Run task] start.")
-        taskStatus = 1
-        defaultTaskId = 0
-        while (taskStatus == 1) {
-            val tasks = getTaskPackage(packageSize)
-            if (CollectionUtils.isEmpty(tasks)) break
-            handleTaskByApiType(tasks, apiType)
+        (1..maxPage).map { pageNum ->
+            Pair(pageNum, CompletableFuture.supplyAsync {
+                val resultQuery = Query(Criteria.where("taskId").`is`(taskId)).skip((pageNum - 1) * QUERY_LIMIT.toLong()).limit(QUERY_LIMIT)
+                mongoTemplate.find(resultQuery, TraceTaskResult::class.java, TableNames.MONGO_TRACE_TASK_RESULT)
+            })
+        }.forEach {
+            val list = it.second.get()
+            rslist.addAll(list)
+            logger.info("[queryResultByTaskId] page=${it.first}, skip=${(it.first - 1) * QUERY_LIMIT.toLong()} > get=${list.size}")
         }
-        if (taskStatus == 3) logger.info("[Run task] interrupted.")
-        else logger.info("[Run task] done.")
-        taskStatus = 0
 
-        if (this.countTaskItem() == this.countTaskResult() && Files.exists(Paths.get(zipFileName))) {
-            this.exportTaskResult()
-        }
+        logger.info("[queryResultByTaskId] query is done > rslist=${rslist.size}")
+        return rslist
     }
 
-    fun handleTaskByApiType(tasks: List<FetchTask>, apiType: Int) {
-        val st = System.currentTimeMillis()
-        val finishedSize = when (apiType) {
-            0 -> handleTask(tasks, this::fetchCard, PartCard::mid)
-            1 -> handleTask(tasks, this::fetchMember, Member::mid)
-            else -> throw RuntimeException("未定义的API Type")
-        }.size
-        val et = System.currentTimeMillis()
-        logger.info("[Package] $finishedSize/${tasks.size}, ${finishedSize * 1000 / (et - st)}/s")
+    fun getTaskResultsByTaskId(taskId: Long): List<TraceTaskResult> {
+        val taskSize = mongoTemplate.count(Query(Criteria.where("taskId").`is`(taskId)), TraceTaskResult::class.java, TableNames.MONGO_TRACE_TASK_RESULT)
+        return queryResultByTaskId(taskId, taskSize.toInt())
+    }
+
+
+    /**
+     * 和前一个任务进行比较，一些异常的数据的mid
+     */
+    fun getUnexpectPairs(taskId: Long): List<Pair<Long, Long>> {
+        val checkQuery = Query(Criteria.where("taskId").`is`(defaultTaskId).and("fans").lte(ABNORMAL_FANS_VALUE))
+        val abnormalResults: MutableList<TraceTaskResult> = mongoTemplate.find(checkQuery, TraceTaskResult::class.java, TableNames.MONGO_TRACE_TASK_RESULT)
+        val abnormalMids = abnormalResults.map { it.mid }.toMutableSet()
+        // 两个数据相差过大
+        fun isBigDiff(a: Long, b: Long): Boolean {
+            if (b == 0L || a == 0L) return true
+
+            return Math.abs(a * 1.0 / b - 1) > 0.25
+        }
+
+        val prevTaskId = getPrevTaskId(taskId)
+        if (prevTaskId == 0L) {
+            return abnormalResults.map { Pair(it.mid, it.fans) }
+        }
+
+        val thisResults = getTaskResultsByTaskId(taskId)
+        val thisMap = thisResults.associateBy { it.mid }
+
+        val prevResults = getTaskResultsByTaskId(prevTaskId)
+        val prevMap = prevResults.associateBy { it.mid }
+
+        val intersectMids = thisMap.keys.intersect(prevMap.keys)
+        val unexpectResultMids = intersectMids.filter { mid ->
+            isBigDiff(thisMap[mid]!!.fans, prevMap[mid]!!.fans)
+        }.toSet()
+
+        val dayAgoTaskId = getPrevTaskId(prevTaskId)
+
+        val dayAgoResults = getTaskResultsByTaskId(dayAgoTaskId)
+        val dayAgoMap = dayAgoResults.filter { unexpectResultMids.contains(it.mid) }.associateBy { it.mid }
+
+        // 获取前一任务中异常的MIDs，把这一部分从unexpectResultMids中移除
+        val unexpectMidsInPrev = dayAgoMap.keys.filter { mid ->
+            isBigDiff(dayAgoMap[mid]!!.fans, prevMap[mid]!!.fans)
+        }
+
+        abnormalMids.addAll(unexpectResultMids.filter { !unexpectMidsInPrev.contains(it) })
+        return abnormalMids.map { Pair(it, thisMap[it]!!.fans) }
+    }
+
+    /**
+     * 获取前一个taskId
+     */
+    fun getPrevTaskId(taskId: Long): Long {
+        val someDayAgo = taskId - 3600 * 24 * 1000 * 7 //一周前
+        val query = Query(Criteria.where("taskId").lt(taskId).gte(someDayAgo))
+
+        val rslist = mongoTemplate.getCollection(TableNames.MONGO_TRACE_TASK_RESULT)
+                .distinct("taskId", query.queryObject, java.lang.Long::class.java)
+                .asSequence()
+                .map { it.toLong() }
+                .filter { it > 0 }
+                .sortedDescending()
+                .toList()
+        return rslist.firstOrNull() ?: 0
     }
 
     /**
      * 任务代理，根据传入的参数执行任务
      * @param tasks 任务内容
      * @param fetchFunc 爬取方法
-     * @param filterFunc 过滤结果，对成功爬取的任务返回True
-     * @param saveFunc 把结果保存在数据库
      * @return 成功爬取的mid
      */
-    fun <T> handleTask(tasks: List<FetchTask>, fetchFunc: (Long) -> T, idMapper: (T) -> Long): List<Long> {
+    fun <T : Any> handleTask(tasks: List<FetchTask>, fetchFunc: (Long) -> T, midGetter: (T) -> Long): List<Long> {
         return tasks.map { task ->
             CompletableFuture.supplyAsync(Supplier { fetchFunc(task.mid) }, HttpSender.threadPool)
         }.asSequence()
                 .map { it.get() }
-                .filter { idMapper.invoke(it) > 0 }
+                .filter { midGetter.invoke(it) > 0 }
                 .toList()
-                .apply { saveTaskResult(this, idMapper) }
-                .map(idMapper)
+                .apply { saveTaskResult(this, midGetter) }
+                .map(midGetter)
     }
 
-    fun fetchMember(mid: Long): Member {
-        val spider = Nest.getSpider()
-        val html = spider.fetchMember(mid).also { Nest.returnSpider(spider) }
-        if (html.isBlank()) return Member(0)
-        try {
-            val res = mapper.readTree(html)
-            val status = res.get("status")?.asBoolean() ?: false
-            if (status) {
-                val data: JsonNode = res.get("data")
-                val member = data.asBean(Member::class.java, mapper)
-                member.sex = sexMap[data.get("sex")?.asText()] ?: 2
-                member.face = member.face.split("face/").run {
-                    if (this.size == 2) this[1] else member.face
-                }
-                member.level = data.get("level_info")?.get("current_level")?.asInt() ?: 0
-                return member
-            } else {
-                return Member(mid)
-            }
-        } catch (e: Exception) {
-            logger.debug("[Fetch Member] error mid=$mid, none.nintha.vtraceapi.spider=${spider.getProxyAddress()}(FT=${spider.failTimes}), html=$html", e)
+    fun fetchTraceTaskResult(mid: Long): TraceTaskResult {
+        val partCard = fetchCard(mid)
+        val archiveView = biliFetcher.fetchMemberArchiveView(mid)
+        return if (archiveView < 0L) {
+            TraceTaskResult()
+        } else {
+            TraceTaskResult().apply { BeanUtils.copyProperties(partCard, this) }.apply { this.archiveView = archiveView }
         }
-        return Member(0)
     }
 
-//    fun saveMember(members: Collection<Member>) {
-//        if (CollectionUtils.isEmpty(members)) return
-//        mongoTemplate.setWriteConcern(WriteConcern.UNACKNOWLEDGED)
-//        mongoTemplate.insert(members, TableNames.MONGO_MEMBER_INFO);
-//        members.map { it.mid }.also { finishTask(it) }
-//    }
-    fun fetchCardLocally(mid: Long): PartCard{
-        return fetchCardCommon(mid, Spider(HttpSender.LOCALHOST,0))
-    }
-    fun fetchCard(mid: Long): PartCard{
-        return fetchCardCommon(mid, null)
+    fun fetchCardLocally(mid: Long): PartCard {
+        return fetchCardCommon(mid, Spider(HttpSender.LOCALHOST, 0))
     }
 
-    fun fetchCardCommon(mid: Long, theSpider: Spider? = null): PartCard {
+    /**
+     * 使用代理池IP爬取数据
+     */
+    fun fetchCard(mid: Long): PartCard {
+        return fetchCardCommon(mid, null, 3)
+    }
+
+    /**
+     * 当返回值的code!=0时进行重试;
+     * code!=0有两种情况: A. 服务器抽风了，重新访问下又正常, B. 这个mid被屏蔽无法查询
+     * 一般情况下无法区分，所以需要重试处理
+     */
+    fun fetchCardCommon(mid: Long, theSpider: Spider? = null, retry: Int = 0): PartCard {
         val spider = theSpider ?: Nest.getSpider()
         val html = spider.fetchCard(mid).also { Nest.returnSpider(spider) }
         if (html.isBlank()) return PartCard(0)
+
+        var retVal = PartCard(0)
         try {
             val res = mapper.readTree(html)
             val code = res.get("code")?.asInt() ?: -1
-            return if (code == 0) {
+            retVal = if (code == 0) {
                 val partCard = PartCard(mid)
                 res.get("data").get("card").apply {
                     partCard.name = this.get("name").asText()
@@ -208,31 +277,30 @@ class BiliService {
         } catch (e: Exception) {
             logger.debug("[Fetch Card] error mid=$mid, none.nintha.vtraceapi.spider=${spider.getProxyAddress()}(FT=${spider.failTimes}), html=$html", e)
         }
-        return PartCard(0)
-    }
 
-//    fun saveCard(cards: Collection<PartCard>) {
-//        if (CollectionUtils.isEmpty(cards)) return
-//        mongoTemplate.setWriteConcern(WriteConcern.UNACKNOWLEDGED)
-//        mongoTemplate.insert(cards, TableNames.MONGO_PART_CARD);
-//        cards.map { it.mid }.also { finishTask(it) }
-//    }
-
-    fun <T> saveTaskResult(results: Collection<T>, idMapper: (T) -> Long) {
-        if (CollectionUtils.isEmpty(results)) return
-        mongoTemplate.setWriteConcern(WriteConcern.UNACKNOWLEDGED)
-        mongoTemplate.insert(results, TableNames.MONGO_TRACE_TASK_RESULT)
-        results.map(idMapper).also {
-            val query = Query(Criteria.where("mid").`in`(it))
-            val update = Update.update("status", FetchTask.STATUS_FINISHED)
-            mongoTemplate.updateMulti(query, update, TableNames.MONGO_TRACE_TASK_TIEM)
+        // 对taskId = 0的异常情况进行重试
+        if (retVal.taskId == 0L && retry > 0) {
+            return fetchCardCommon(mid, theSpider, retry - 1)
         }
+
+        if (retVal.taskId == 0L) retVal = PartCard(0)
+        return retVal
     }
 
-    fun resetTaskResult() {
-        mongoTemplate.dropCollection(TableNames.MONGO_TRACE_TASK_RESULT)
-        val index = Index().on("mid", Sort.Direction.ASC).on("taskId", Sort.Direction.DESC).unique()
-        mongoTemplate.indexOps(TableNames.MONGO_TRACE_TASK_RESULT).ensureIndex(index)
+
+    fun <T : Any> saveTaskResult(results: Collection<T>, midGetter: (T) -> Long) {
+        if (CollectionUtils.isEmpty(results)) return
+
+        val docs = when {
+            // PartCard => TraceTaskResult
+            results.iterator().next() is PartCard -> {
+                results.map { rs -> TraceTaskResult().apply { BeanUtils.copyProperties(rs, this) } }.filter { it.taskId > 0 }
+            }
+            else -> results
+        }
+
+        mongoTemplate.setWriteConcern(WriteConcern.UNACKNOWLEDGED)
+        mongoTemplate.insert(docs, TableNames.MONGO_TRACE_TASK_RESULT)
     }
 
     fun resetTaskItem() {
@@ -246,22 +314,6 @@ class BiliService {
         mongoTemplate.insert(items, TableNames.MONGO_TRACE_TASK_TIEM)
     }
 
-    fun getTaskPackage(packageSize: Int): List<FetchTask> {
-        val criteria = Criteria.where("status").lte(FetchTask.STATUS_WAITING)
-        val query = Query(criteria).limit(packageSize)
-        val tasks: MutableList<FetchTask> = mongoTemplate.find(query, FetchTask::class.java, TableNames.MONGO_TRACE_TASK_TIEM)
-        return tasks
-    }
-
-//    fun finishTask(mids: List<Long>) {
-//        val query = Query(Criteria.where("mid").`in`(mids))
-//        val update = Update.update("status", FetchTask.STATUS_FINISHED)
-//        mongoTemplate.updateMulti(query, update, TableNames.MONGO_FETCH_TASK)
-//    }
-
-    fun configTask() {
-
-    }
 
     fun countTaskItem(): Long {
         return mongoTemplate.count(Query(), TableNames.MONGO_TRACE_TASK_TIEM)
@@ -271,33 +323,41 @@ class BiliService {
         return mongoTemplate.count(Query(), TableNames.MONGO_TRACE_TASK_RESULT)
     }
 
-    fun exportTaskResult() {
-        if (taskStatus != 0) return
 
-        logger.info("[Export] start")
-        taskStatus = 2
-        Files.deleteIfExists(Paths.get(zipFileName))
-        val process: Process = Runtime.getRuntime().exec(exportCommand)
-        val bufferedReader = process.errorStream.bufferedReader()
-        while (true) {
-            val line = bufferedReader.readLine() ?: break
-            println(line)
+    /**
+     * 发送任务报告邮件
+     */
+    fun sendTaskResultEmail(results: List<TraceTaskResult>, taskSize: Long) {
+        if (StringUtils.isEmpty(taskWatcherEmails)) return
+        if (CollectionUtils.isEmpty(results)) return
+
+        val taskId: Long = results.first().taskId
+        val subject = "Vtracer Task Report ${TimeUtil.ofEpochSec(taskId / 1000)}"
+        val text = """
+            |${TimeUtil.ofEpochSec(taskId / 1000)}
+            |taskId=$taskId
+            |result/taskSize=${results.size}/$taskSize""".trimMargin()
+
+        val csv = "mid,fans,archive,archiveView,taskId,rtime\n" + results
+                .map { "${it.mid},${it.fans},${it.archive},${it.archiveView},${it.taskId},${it.rtime}" }
+                .joinToString("\n")
+
+        if (Files.notExists(Paths.get("csv"))) {
+            Files.createDirectory(Paths.get("csv"))
         }
-        logger.info("[Export] csv -> zip")
-        val fis = Files.newInputStream(Paths.get(csvFileName))
-        val reader = fis.bufferedReader()
+        val zipFileName = "csv/$taskId.zip"
         val fos = Files.newOutputStream(Paths.get(zipFileName))
-
         ZipOutputStream(fos).apply { this.setLevel(9) }.use { zip ->
             zip.putNextEntry(ZipEntry("output.csv"))
-            while (true) {
-                val line = reader.readLine() ?: break
-                zip.write("$line\n".toByteArray())
-            }
+            zip.write(csv.toByteArray())
             zip.closeEntry()
         }
-        Files.deleteIfExists(Paths.get(csvFileName))
-        taskStatus = 0
-        logger.info("[Export] done")
+
+        taskWatcherEmails.split(",").map { it.trim() }.forEach { email ->
+            mailService.sendAttachmentsMail(email, text, subject, mapOf("$taskId.zip" to zipFileName))
+        }
+
+        logger.info("sendTaskResultEmail, emails=$taskWatcherEmails")
+
     }
 }

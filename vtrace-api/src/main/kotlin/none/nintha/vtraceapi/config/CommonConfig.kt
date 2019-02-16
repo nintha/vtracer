@@ -1,6 +1,6 @@
 package none.nintha.vtraceapi.config
 
-import org.springframework.boot.web.embedded.tomcat.TomcatServletWebServerFactory
+import org.springframework.boot.web.embedded.undertow.UndertowServletWebServerFactory
 import org.springframework.boot.web.server.ErrorPage
 import org.springframework.boot.web.servlet.server.ConfigurableServletWebServerFactory
 import org.springframework.context.annotation.Bean
@@ -31,7 +31,7 @@ class CommonConfig : WebMvcConfigurer {
 
     @Bean
     fun webServerFactory(): ConfigurableServletWebServerFactory {
-        val factory = TomcatServletWebServerFactory();
+        val factory = UndertowServletWebServerFactory();
         factory.addErrorPages(ErrorPage(HttpStatus.NOT_FOUND, "/"))
         factory.addErrorPages(ErrorPage(HttpStatus.UNAUTHORIZED, "/401"))
         return factory

@@ -16,7 +16,7 @@ public class ControllerExceptionHandler {
      * @return
      */
     @ExceptionHandler({ UnloginException.class })
-    public Results MethodArgumentNotValidHandler(Exception ex, HttpServletRequest req) {
-        return Results.Companion.unlogin();
+    public Results UnloginExceptionHandler(Exception ex, HttpServletRequest req) {
+        return Results.unlogin();
     }
 }

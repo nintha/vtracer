@@ -1,4 +1,4 @@
-package none.nintha.bilifetcher.proxi
+package none.nintha.vtraceapi.spider.proxi
 
 import none.nintha.vtraceapi.util.HttpSender
 import org.slf4j.Logger
@@ -6,8 +6,8 @@ import org.slf4j.LoggerFactory
 
 class Kuaidaili : Proci {
     override val logger: Logger = LoggerFactory.getLogger(this::class.java)
-    private val inha = (1..10).map { "https://www.kuaidaili.com/free/inha/$it/" }
-    private val intr = (1..10).map { "https://www.kuaidaili.com/free/intr/$it/" }
+    private val inha = (1..20).map { "https://www.kuaidaili.com/free/inha/$it/" }
+    private val intr = (1..20).map { "https://www.kuaidaili.com/free/intr/$it/" }
     private val urls = inha + intr
     private val regex = Regex("""<td data-title="IP">([0-9\.]+?)</td>[\s\n\r]+?<td data-title="PORT">([0-9]*?)</td>""")
     override fun fetch(): Set<String> {

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.Maps;
+import com.mongodb.WriteConcern;
 import com.mongodb.client.result.UpdateResult;
 import none.nintha.vtraceapi.entity.*;
 import none.nintha.vtraceapi.entity.consts.TraceStatus;
@@ -17,6 +18,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.aggregation.Aggregation;
+import org.springframework.data.mongodb.core.aggregation.AggregationOptions;
 import org.springframework.data.mongodb.core.aggregation.AggregationResults;
 import org.springframework.data.mongodb.core.aggregation.TypedAggregation;
 import org.springframework.data.mongodb.core.query.Criteria;
@@ -26,10 +28,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 
 import java.time.LocalDateTime;
-import java.util.Date;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
@@ -52,19 +52,17 @@ public class TracerService {
 
     private final static int KEEP_MEMBER_MAX = 20;
     private final static int TRACE_MEMBER_MAX = 200;
-    private final static int TRACE_VIDEO_MAX = 9999;
     private final static int TRACE_FAILURE_MAX = 5; // 失败次数上限，超过上限该视频停止追踪
 
     // {mid: aid}
-    private final static Map<Long, Long> traceVideoMap = Maps.newConcurrentMap();
+    private final static ConcurrentMap<Long, Long> traceVideoMap = Maps.newConcurrentMap();
     // 失败计数器
-    private final static Map<Long, AtomicInteger> failureCountMap = Maps.newConcurrentMap();
+    private final static ConcurrentMap<Long, AtomicInteger> failureCountMap = Maps.newConcurrentMap();
+
     @Autowired
     MongoTemplate mongoTemplate;
-
     @Autowired
     BiliFetcher biliFetcher;
-
     @Autowired
     BiliService biliService;
 
@@ -74,8 +72,6 @@ public class TracerService {
 
     /**
      * 发现UP新上传视频
-     *
-     * @param mid
      */
     public void traceMemberArchive(long mid) {
         try {
@@ -92,7 +88,7 @@ public class TracerService {
 
             this.addTraceVideo(aid);
         } catch (Exception e) {
-            logger.error("solve member least video error.", e);
+            logger.error("solve member least video error, mid={}", mid, e);
         }
     }
 
@@ -107,10 +103,10 @@ public class TracerService {
 
         long view = biliFetcher.fetchMemberArchiveView(mid);
         MemberInfo info = MemberInfo.ofPartCard(card);
-        info.setArchiveView(view);
+        info.setArchiveView(view > 0 ? view : 0);
         MemberInfo lastMemberInfo = getLastMemberInfo(mid);
         // 重复数据不再插入
-        if (Objects.equals(info, lastMemberInfo) == false) {
+        if (!Objects.equals(info, lastMemberInfo)) {
             mongoTemplate.insert(info, TableNames.MONGO_TRACE_MEMBER_INFO);
         }
     }
@@ -125,8 +121,6 @@ public class TracerService {
 
     /**
      * 追踪视频数据
-     *
-     * @param aid
      */
     public void traceVideo(long aid) {
         try {
@@ -139,7 +133,7 @@ public class TracerService {
 
             VideoStat last = getLastVideoStat(aid);
             // 重复数据不再插入
-            if (Objects.equals(videoStat, last) == false) {
+            if (!Objects.equals(videoStat, last)) {
                 videoStat.setCtime(new Date());
                 mongoTemplate.insert(videoStat, TableNames.MONGO_TRACE_VIDEO_STAT);
             }
@@ -154,6 +148,7 @@ public class TracerService {
     public void traceVideoBatch(List<Long> aidList) {
         if (CollectionUtils.isEmpty(aidList)) return;
         if (aidList.size() > 100) {
+            logger.warn("traceVideoBatch max args is 100");
             aidList = aidList.subList(0, 100);
         }
         JsonNode node = null;
@@ -168,15 +163,20 @@ public class TracerService {
         } catch (Exception e) {
             logger.error("traceVideoBatch, fetch error, aids={}.", aidList, e);
         }
+
+        if(node == null) return;
+
+        Map<Long, Long> aidOnlineMap = biliFetcher.fetchVideoOnlineCountBatch(aidList);
+
         for (long aid : aidList) {
             try {
-                if (null == node.get("data").get(aid + "")) {
+                if (null == node.get("data").get(String.valueOf(aid))) {
                     // 失败计数，连续超过N次停止追踪
-                    AtomicInteger oldOne = failureCountMap.putIfAbsent(aid, new AtomicInteger(1));
-                    int oldValue = oldOne == null ? 0 : oldOne.intValue();
-                    logger.warn("traceVideoBatch, aid:{} is not exist, failure count={}", aid, oldValue + 1);
-                    if (oldValue > 0) {
-                        if (oldOne.incrementAndGet() > TRACE_FAILURE_MAX) {
+                    AtomicInteger failureCount = failureCountMap.putIfAbsent(aid, new AtomicInteger(1));
+                    int countIntValue = failureCount == null ? 0 : failureCount.intValue();
+                    logger.warn("traceVideoBatch, aid:{} is not exist, failure count={}", aid, countIntValue + 1);
+                    if (countIntValue > 0) {
+                        if (failureCount.incrementAndGet() > TRACE_FAILURE_MAX) {
                             this.updateTraceStatus(aid, TraceStatus.STOPPED.code);
                             failureCountMap.remove(aid);
                             logger.warn("Failure times is over limit, stop to trace aid:{}.", aid);
@@ -184,15 +184,18 @@ public class TracerService {
                     }
                     continue;
                 }
-                JsonNode jsonNode = node.get("data").get(aid + "").get("stat");
+                JsonNode jsonNode = node.get("data").get(String.valueOf(aid)).get("stat");
                 if (jsonNode.isNull()) continue;
 
                 VideoStat videoStat = mapper.readValue(jsonNode.toString(), VideoStat.class);
                 if (videoStat == null) return;
 
+                long onlineCount = aidOnlineMap.getOrDefault(aid, -1L);
+                videoStat.setOnline(onlineCount);
+
                 VideoStat last = getLastVideoStat(aid);
                 // 重复数据不再插入
-                if (Objects.equals(videoStat, last) == false) {
+                if (!Objects.equals(videoStat, last)) {
                     videoStat.setCtime(new Date());
                     mongoTemplate.insert(videoStat, TableNames.MONGO_TRACE_VIDEO_STAT);
                 }
@@ -272,7 +275,6 @@ public class TracerService {
     public int addTraceVideo(long aid) {
         boolean exists = mongoTemplate.exists(new Query(Criteria.where("aid").is(aid)), TableNames.MONGO_TRACE_VIDEO);
         if (exists) return 0;
-        if (this.countEnableTraceVideo() >= TRACE_VIDEO_MAX) return 0;
 
         JsonNode videoInfo = fetchVideoInfo(aid);
 
@@ -303,6 +305,7 @@ public class TracerService {
         Update update = Update.update("pic", videoInfo.get("pic").asText(Strings.EMPTY))
                 .set("title", videoInfo.get("title").asText(Strings.EMPTY))
                 .set("mid", videoInfo.get("owner").get("mid").asLong(0));
+        mongoTemplate.setWriteConcern(WriteConcern.ACKNOWLEDGED);
         UpdateResult result = mongoTemplate.updateFirst(query, update, TableNames.MONGO_TRACE_VIDEO);
         return result.getModifiedCount();
     }
@@ -325,6 +328,7 @@ public class TracerService {
     public long updateEndTime(long aid, Date endTime) {
         Query query = new Query(Criteria.where("aid").is(aid));
         Update update = Update.update("endTime", endTime);
+        mongoTemplate.setWriteConcern(WriteConcern.ACKNOWLEDGED);
         UpdateResult updateResult = mongoTemplate.updateFirst(query, update, TableNames.MONGO_TRACE_VIDEO);
         return updateResult.getModifiedCount();
     }
@@ -332,6 +336,7 @@ public class TracerService {
     public long updateTraceStatus(long aid, int status) {
         Query query = new Query(Criteria.where("aid").is(aid));
         Update update = Update.update("status", status);
+        mongoTemplate.setWriteConcern(WriteConcern.ACKNOWLEDGED);
         UpdateResult updateResult = mongoTemplate.updateFirst(query, update, TableNames.MONGO_TRACE_VIDEO);
         return updateResult.getModifiedCount();
     }
@@ -347,6 +352,18 @@ public class TracerService {
 
         Query query = new Query(Criteria.where("mid").is(mid));
         Update update = Update.update("keep", keep);
+        mongoTemplate.setWriteConcern(WriteConcern.ACKNOWLEDGED);
+        UpdateResult updateResult = mongoTemplate.updateFirst(query, update, TableNames.MONGO_TRACE_MEMBER);
+        return updateResult.getModifiedCount();
+    }
+
+    /**
+     * 修改member的 mini 状态
+     */
+    public long updateMemberMiniStatus(long mid, int mini) {
+        Query query = new Query(Criteria.where("mid").is(mid));
+        Update update = Update.update("mini", mini);
+        mongoTemplate.setWriteConcern(WriteConcern.ACKNOWLEDGED);
         UpdateResult updateResult = mongoTemplate.updateFirst(query, update, TableNames.MONGO_TRACE_MEMBER);
         return updateResult.getModifiedCount();
     }
@@ -356,6 +373,7 @@ public class TracerService {
      */
     public long removeTraceMember(long mid) {
         Query query = new Query(Criteria.where("mid").is(mid));
+        mongoTemplate.setWriteConcern(WriteConcern.ACKNOWLEDGED);
         long effect = mongoTemplate.remove(query, TableNames.MONGO_TRACE_MEMBER).getDeletedCount();
         if (effect > 0) mongoTemplate.remove(query, TableNames.MONGO_TRACE_MEMBER_INFO);
         return effect;
@@ -366,6 +384,7 @@ public class TracerService {
      */
     public long removeTraceVideo(long aid) {
         Query query = new Query(Criteria.where("aid").is(aid));
+        mongoTemplate.setWriteConcern(WriteConcern.ACKNOWLEDGED);
         long effect = mongoTemplate.remove(query, TableNames.MONGO_TRACE_VIDEO).getDeletedCount();
         if (effect > 0) mongoTemplate.remove(query, TableNames.MONGO_TRACE_VIDEO_STAT);
         return effect;
@@ -378,7 +397,7 @@ public class TracerService {
         TypedAggregation<VideoStat> agg = Aggregation.newAggregation(
                 VideoStat.class,
                 match(Criteria.where("aid").is(aid).and("ctime").gte(startTime).lte(endTime)),
-                project("ctime", "coin", "share", "view", "danmaku", "favorite", "reply", "like", "dislike")
+                project("ctime", "coin", "share", "view", "danmaku", "favorite", "reply", "like", "dislike", "online")
                         .andExpression("ceil((ctime - [0]) / [1])", new Date(0), interval)
                         .as("cdate"),
                 group("cdate")
@@ -390,8 +409,10 @@ public class TracerService {
                         .max("share").as("share")
                         .max("like").as("like")
                         .max("dislike").as("dislike")
+                        .max("online").as("online")
                         .max("ctime").as("ctime"),
                 sort(Sort.Direction.ASC, "ctime"));
+        agg.withOptions(AggregationOptions.builder().allowDiskUse(true).build());
         AggregationResults<Map> results = mongoTemplate.aggregate(agg, TableNames.MONGO_TRACE_VIDEO_STAT, Map.class);
         List<Map> mappedResults = results.getMappedResults();
         return mappedResults.stream().map(v -> mapper.convertValue(v, VideoStat.class)).collect(Collectors.toList());

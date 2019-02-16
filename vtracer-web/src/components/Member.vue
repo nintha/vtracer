@@ -4,10 +4,11 @@
     <div v-if="mainTab" key="traceMember">
         <Row>
           <Col span="20"> 
-            <Input v-model="name" placeholder="用户名称/mid" style="width: 300px">
-                <Select v-model="filterSelectValue" slot="prepend" style="width: 80px" @on-change="filterSearch">
+            <Input v-model="name" placeholder="用户名称/mid [模糊匹配]" style="width: 400px">
+                <Select v-model="filterSelectValue" slot="prepend" style="width: 100px" @on-change="filterSearch">
                     <Option value="all">All</Option>
                     <Option value="keep">Keep on</Option>
+                    <Option value="mini">Mini Mode</Option>
                 </Select>
                 <Button slot="append" icon="ios-search"  @click="filterSearch"></Button>
             </Input>
@@ -17,7 +18,7 @@
         <br/>
         <Table stripe :loading="loading" :columns="columns" :data="data"></Table>
         <br/>
-        <Page :total="total" :page-size="pageSize" :current="page" show-total class="paging" @on-change="fetchData"></Page>
+        <Page :total="total" :page-size="pageSize" :current="page" show-total show-elevator  class="paging" @on-change="fetchData"></Page>
     </div>
     <div v-else key="memberInfo">
         <Button type="primary" @click="mainTab=true">Back</Button>
@@ -79,10 +80,24 @@ export default {
                 'on-change': value =>
                   this.toggleKeepStatus(data.row.mid, value ? 1 : 0, data.row.name)
               }
-            },[
-              h('Icon',{slot:'open', props:{type:'android-done'}}),
-              h('Icon',{slot:'close', props:{type:'android-close'}}),
-            ])
+            })
+          }
+        },
+        {
+          title: 'Mini Mode',
+          key: 'mini',
+          render: (h, data) => {
+            return h('i-switch', {
+              props: {
+                type: 'primary',
+                value: data.row.mini === 1 //控制开关的打开或关闭状态，官网文档属性是value
+              },
+              on: {
+                //触发事件是on-change,用引号括起来
+                'on-change': value =>
+                  this.toggleMiniStatus(data.row.mid, value ? 1 : 0, data.row.name)
+              }
+            })
           }
         },
         {
@@ -133,7 +148,7 @@ export default {
       total: 0,
       pageSize: 20,
       name: '',
-      filterSelectValue: 'all',
+      filterSelectValue: 'all', // 过滤条件下拉框值
     }
   },
   methods: {
@@ -145,7 +160,8 @@ export default {
       const param = {
         pageNum:page, 
         name: this.name, 
-        keep: this.filterSelectValue === 'keep' ? 1 : null
+        keep: this.filterSelectValue === 'keep' ? 1 : null,
+        mini: this.filterSelectValue === 'mini' ? 1 : null
       }
       this.$api.get(`/trace/member`, param, r => {
         this.data = r.data.list
@@ -156,6 +172,17 @@ export default {
     },
     toggleKeepStatus(mid, keep, name) {
       this.$api.put(`/trace/member/${mid}/keep/${keep}`, {}, r => {
+        if (r.data.effect > 0) {
+          //
+        } else {
+          this.$Notice.error({
+            title: `Oops! ${name} is out of control.`
+          })
+        }
+      })
+    },
+    toggleMiniStatus(mid, mini, name) {
+      this.$api.put(`/trace/member/${mid}/mini/${mini}`, {}, r => {
         if (r.data.effect > 0) {
           //
         } else {

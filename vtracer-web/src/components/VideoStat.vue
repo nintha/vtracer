@@ -1,14 +1,11 @@
 <template>
   <div>
-    <!-- <div :style="{float:'right', marginRight:'50px'}">
-      <DatePicker type="datetimerange" 
-                placeholder="Select date and time" 
-                style="width: 300px"
-                :value="timestamp2str(dateValue)"
-                :disabled="true"
-                @on-change="fetchVideoStat"></DatePicker>
-    </div> -->
     <h2>{{record.title}}</h2>
+    <br>
+    <div>
+      <Switch size="small" v-model="enableYAxisDataMin" @on-change="changeYAxisMinType" />
+      <strong title="停用/启用: 以 0/数据中的最小值 作为Y轴起点"> Reactive YAxis </strong> 
+    </div>
     <div :style="{position:'relative'}">            
       <LineChart :opt="opt"></LineChart>
       <Spin fix v-if="spinShow">
@@ -17,7 +14,7 @@
       </Spin>
     </div>
     <br>
-    <DateSlider :startTime="dateValue[0]" :endTime="dateValue[1]" :onchange="sliderChanged"></DateSlider>
+    <DateSlider :startTime="originalDateValue[0]" :endTime="originalDateValue[1]" :onchange="sliderChanged"></DateSlider>
   </div>
 </template>
 <style>
@@ -31,27 +28,28 @@ import DateSlider from './DateSlider.vue'
 import moment from 'moment'
 import Vue from 'vue'
 
+const KEY_ENABLE_YAXIS_DATA_MIN = "VideoStat-EnableYAxisDataMin";
 export default {
   components: { LineChart, DateSlider },
   props: {
     record: Object
   },
   data() {
-    const et = moment().isBefore(moment(this.record.endTime))
-      ? +moment()
-      : this.record.endTime
+    const et = +moment()
     return {
       spinShow: true,
+      originalDateValue: [this.record.ctime, et],
       dateValue: [this.record.ctime, et],
-      opt: {}
+      opt: {},
+      enableYAxisDataMin: false
     }
   },
   mounted() {
+    this.enableYAxisDataMin = localStorage.getItem(KEY_ENABLE_YAXIS_DATA_MIN) === 'true'
     this.fetchVideoStat(this.dateValue)
   },
   methods: {
     fetchVideoStat(timerange) {
-      // this.rangeFetch(timerange)
       this.spinShow = true
       const url = `/trace/videoStat/${this.record.aid}`
       this.$api.get(url, { st: timerange[0], et: timerange[1] }, r => {
@@ -62,14 +60,20 @@ export default {
       })
     },
     createOpt(videoStatList) {
-      const fields = ['view', 'coin', 'share', 'danmaku', 'favorite', 'reply', 'like', 'dislike']
+      const otherFields = ['coin', 'share', 'danmaku', 'favorite', 'reply', 'like', 'dislike', 'online']
+      const fields = ['view', ...otherFields]
+      // 如果卡可以再进行性能优化，如减少遍历次数
+      const viewMax = videoStatList.map(v => v.view).reduce((a,b) => a > b ? a : b)
+      const otherMax = videoStatList.flatMap(v => otherFields.map(f=>v[f])).reduce((a,b) => a > b ? a : b)
       let obj = {
         tooltip: {
           trigger: 'axis',
-          formatter: v => {
-            let str = `${moment(v[0].value[0]).format('YYYY-MM-DD HH:mm:ss')}`
-            for(let i=0; i < v.length; i++){
-              str += `<br/>${v[i].marker} ${v[i].name}: ${v[i].value[1]}`
+          formatter: dataSet => {
+            const getSortedValue = data => data.name == 'view' ? data.value[1] / viewMax : data.value[1] / otherMax;
+            dataSet.sort( (left, right) => getSortedValue(right) - getSortedValue(left) )
+            let str = `${moment(dataSet[0].value[0]).format('YYYY-MM-DD HH:mm:ss')}`
+            for(let i=0; i < dataSet.length; i++){
+              str += `<br/>${dataSet[i].marker} ${dataSet[i].name}: ${dataSet[i].value[1]}`
             }
             return str
           }
@@ -87,11 +91,15 @@ export default {
         yAxis: [
           {
             name: 'view',
-            type: 'value'
+            type: 'value',
+            max: 'dataMax',
+            min: this.enableYAxisDataMin ? 'dataMin' : null
           },
           {
             name: 'other',
-            type: 'value'
+            type: 'value',
+            max: 'dataMax',
+            min: this.enableYAxisDataMin ? 'dataMin' : null
           }
         ],
         series: fields.map(field => {
@@ -114,8 +122,12 @@ export default {
     },
     sliderChanged(left, right) {
       // console.log(left,right)
-      const timeranger = [ +moment(left), +moment(right) ]
-      this.fetchVideoStat(timeranger)
+      this.dateValue = [ +moment(left), +moment(right) ]
+      this.fetchVideoStat(this.dateValue)
+    },
+    changeYAxisMinType(status){
+      localStorage.setItem(KEY_ENABLE_YAXIS_DATA_MIN, status)
+      this.fetchVideoStat(this.dateValue)
     },
     str2timestamp(str){
       return +moment(str)

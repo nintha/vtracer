@@ -11,5 +11,5 @@ data class PartCard(var mid: Long) {
     var rtime: Long = 0 // 爬取的时间，时间戳格式
     var taskId: Long = 0 // 爬取任务的ID
 
-    fun getFullFace():String = if(face.startsWith("http")) face else "http://i0.hdslb.com/bfs/face/$face"
+    fun getFullFace(): String = if (face.startsWith("http")) face else "http://i0.hdslb.com/bfs/face/$face"
 }
