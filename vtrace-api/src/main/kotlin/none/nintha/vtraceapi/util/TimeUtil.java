@@ -10,6 +10,17 @@ public class TimeUtil {
     public final static ZoneId ZONE_SHANGHAI = ZoneId.of("Asia/Shanghai");
 
     /**
+     * 转换时间戳（毫秒）
+     *
+     * @param timestamp
+     * @return
+     */
+    public static LocalDateTime ofEpochMilli(long timestamp) {
+        Instant instant = Instant.ofEpochMilli(timestamp);
+        return LocalDateTime.ofInstant(instant, ZONE_SHANGHAI);
+    }
+
+    /**
      * 转换时间戳（秒）
      *
      * @param timestamp

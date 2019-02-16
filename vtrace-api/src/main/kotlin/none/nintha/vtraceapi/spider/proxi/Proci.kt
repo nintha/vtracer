@@ -1,4 +1,4 @@
-package none.nintha.bilifetcher.proxi
+package none.nintha.vtraceapi.spider.proxi
 
 import none.nintha.vtraceapi.spider.Nest
 import none.nintha.vtraceapi.util.HttpSender
@@ -30,7 +30,7 @@ interface Proci {
     fun fetchAndCheck(): Set<String> {
         val proxys = this.fetch().filter(Nest.Companion::isNonInNest).map {
             // 并行检查，提高效率
-            CompletableFuture.supplyAsync(Supplier { Pair(it, this.check(it)) }, HttpSender.threadPool)
+            CompletableFuture.supplyAsync(Supplier { Pair(it, this.check(it)) }, Nest.threadPool)
         }.asSequence().map { it.get() }.filter { it.second }.map { it.first }.toSet()
         logger.info("[Fetch Check] ${this::class.java.simpleName} => ${proxys.size}")
         return proxys

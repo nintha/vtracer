@@ -1,4 +1,4 @@
-package none.nintha.bilifetcher.proxi
+package none.nintha.vtraceapi.spider.proxi
 
 import none.nintha.vtraceapi.util.HttpSender
 import org.slf4j.Logger

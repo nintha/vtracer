@@ -14,6 +14,7 @@ public class VideoStat {
     private long share;
     private long like;
     private long dislike;
+    private long online; //在线人数
     // 写入mongo的时间
     private Date ctime;
 
@@ -97,6 +98,14 @@ public class VideoStat {
         this.dislike = dislike;
     }
 
+    public long getOnline() {
+        return online;
+    }
+
+    public void setOnline(long online) {
+        this.online = online;
+    }
+
     /**
      * check fields exclude ctime
      *
@@ -116,12 +125,14 @@ public class VideoStat {
                 coin == videoStat.coin &&
                 like == videoStat.like &&
                 share == videoStat.share &&
-                dislike == videoStat.dislike;
+                dislike == videoStat.dislike &&
+                online == videoStat.online
+                ;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hashCode(aid, view, danmaku, favorite, reply, coin, share, like, dislike);
+        return Objects.hashCode(aid, view, danmaku, favorite, reply, coin, share, like, dislike, online);
     }
 
     @Override
@@ -136,6 +147,7 @@ public class VideoStat {
                 ", share=" + share +
                 ", like=" + like +
                 ", dislike=" + dislike +
+                ", online=" + online +
                 ", ctime=" + ctime +
                 '}';
     }

@@ -2,6 +2,6 @@
 
 Tracing member and video info of bilibili website.
 
-[Demo](http://45.32.68.44:16201/)
+[Demo](https://vtracer.nintha.top)
 
 项目使用springboot进行编写

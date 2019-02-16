@@ -8,5 +8,7 @@ class ApiGen {
         fun videoHtml(aid:Long):String = "http://www.bilibili.com/video/av${aid}"
         fun memberTotalView(mid:Long):String = "http://api.bilibili.com/x/space/upstat?mid=${mid}"
         fun memberInfo(mid:Long):String = "http://api.bilibili.com/x/web-interface/card?mid=${mid}"
+        fun videoOnlineCount(aid:Long, cid:Long):String = "http://interface.bilibili.com/player?id=cid:$cid&aid=$aid"
+        fun videoPart(aid:Long):String = "https://api.bilibili.com/x/player/pagelist?aid=${aid}"
     }
 }

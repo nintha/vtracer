@@ -5,17 +5,15 @@
       <span style="display:inline-block; width:200px;">{{spiderBusyNum}} / {{spiderTotalNum}}</span>
     </Progress>
     <br><br>
-    <h3>Task Process: {{getProcess()}}</h3>
-    <Progress :percent="taskTotalNum == 0 ? 0:taskFinishedNum * 100 / taskTotalNum" status="active" :stroke-width="20">
-      <span style="display:inline-block; width:200px;">{{taskFinishedNum}} / {{taskTotalNum}}</span>
-    </Progress>
+    <h3>Task Process</h3>
+    <Tooltip :content="taskFinishedNum / taskTotalNum"  placement="top" style="width: 100%">
+      <Progress :percent="50" status="active" :stroke-width="20">
+        <span style="display:inline-block; width:200px;">{{taskFinishedNum}} / {{taskTotalNum}}</span>
+      </Progress>
+    </Tooltip>
     <br><br>
     <div style="text-align:right; padding: 0 40px;">
-      <!-- <Button v-if="waitting" type="dashed">{{waittingMessage}}</Button> -->
-      <!-- <Button @click="startTask" v-if="!waitting && running === 0" type="primary" ghost>Start Task</Button> -->
-      <Button @click="stopTask" v-if="!waitting && running === 1" type="warning" ghost>Stop Task</Button>
-      <Button @click="openDrawer" v-if="!waitting && running === 0" type="error" ghost>Upload CSV</Button>
-      <!-- <Button @click="downloadFile" v-if="!waitting && running === 0 && taskTotalNum === taskFinishedNum && taskTotalNum > 0" type="primary" ghost>Download</Button> -->
+    
     </div>
     <Divider dashed />
     <h3>Tips</h3>
@@ -118,13 +116,6 @@ export default {
         }
       });
     },
-    // getNestStatus() {
-    //   this.$api.get("/proxy/nest", {}, r => {
-    //     this.spiderTotalNum = r.data.total;
-    //     this.spiderFreeNum = r.data.queue;
-    //     this.spiderBusyNum = this.spiderTotalNum - this.spiderFreeNum;
-    //   });
-    // },
     syncStatus(){
         this.getTaskStatus();
         // this.getNestStatus();
@@ -151,7 +142,13 @@ export default {
     },
     onUploadSuccess(event, file, fileList) {
       if(event.code === 0){
-        this.$Message.success('upload file success');
+        const data = event.data
+        const message = `upload ${data.duplicate + data.unique} mids, ${data.unique} is valid, ${data.duplicate} is duplicate`
+        console.log(message)
+        this.$Message.success({
+          content: message,
+          duration: 7
+        });
       }else{
         this.$Message.error(event.message);
       }

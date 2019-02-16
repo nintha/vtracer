@@ -1,6 +1,11 @@
 <template>
   <div>
     <h2>{{record.name}}</h2>
+    <br>
+    <div>
+      <Switch size="small" v-model="enableYAxisDataMin" @on-change="changeYAxisMinType" />
+      <strong title="停用/启用: 以 0/数据中的最小值 作为Y轴起点"> Reactive YAxis </strong> 
+    </div>
     <div :style="{position:'relative'}">            
       <LineChart :opt="opt"></LineChart>
       <Spin fix v-if="spinShow">
@@ -9,7 +14,7 @@
       </Spin>
     </div>
     <br>
-    <DateSlider :startTime="dateValue[0]" :endTime="dateValue[1]" :onchange="sliderChanged"></DateSlider>
+    <DateSlider :startTime="originalDateValue[0]" :endTime="originalDateValue[1]" :onchange="sliderChanged"></DateSlider>
   </div>
 </template>
 <style>
@@ -23,6 +28,7 @@ import DateSlider from './DateSlider.vue'
 import moment from 'moment'
 import Vue from 'vue'
 
+const KEY_ENABLE_YAXIS_DATA_MIN = "MemberInfo-EnableYAxisDataMin";
 export default {
   components: { LineChart, DateSlider },
   props: {
@@ -31,11 +37,14 @@ export default {
   data() {
     return {
       spinShow: true,
+      originalDateValue: [this.record.ctime, +moment()],
       dateValue: [this.record.ctime, +moment()],
-      opt: {}
+      opt: {},
+      enableYAxisDataMin: true
     }
   },
   mounted() {
+    this.enableYAxisDataMin = localStorage.getItem(KEY_ENABLE_YAXIS_DATA_MIN) === 'true'
     this.fetchMemberInfo(this.dateValue)
   },
   methods: {
@@ -75,12 +84,12 @@ export default {
           {
             name: 'fans',
             type: 'value',
-            min: 'dataMin'
+            min: this.enableYAxisDataMin ? 'dataMin' : null
           },
           {
             name: 'archiveView',
             type: 'value',
-            min: 'dataMin'
+            min: this.enableYAxisDataMin ? 'dataMin' : null
           },
           
         ],
@@ -103,7 +112,12 @@ export default {
       return obj
     },
     sliderChanged(left, right) {
+      this.dateValue = [left, right]
       this.fetchMemberInfo([left, right])
+    },
+    changeYAxisMinType(status){
+      localStorage.setItem(KEY_ENABLE_YAXIS_DATA_MIN, status)
+      this.fetchMemberInfo(this.dateValue)
     },
     str2timestamp(str) {
       return +moment(str)

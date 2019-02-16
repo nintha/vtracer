@@ -38,7 +38,6 @@ export default {
     this.prevRightVal = this.rightVal
     // 修复宽度抖动
     this.$refs['date-slider'].style.width = this.dateSliderWidth + 'px'
-    // console.log('dateSliderWidth', this.dateSliderWidth)
   },
   methods: {
     mouseMove(e) {
@@ -84,7 +83,6 @@ export default {
         return
       }
       this.prevX = e.screenX;
-      console.log(e)
       this.isDown = true
       const btnwidth = 8
       if (e.offsetX < btnwidth) {
