@@ -153,7 +153,8 @@ class BiliService {
         // 两个数据相差过大
         fun isBigDiff(a: Long, b: Long): Boolean {
             if (b == 0L || a == 0L) return true
-
+            if (a > (b+3000)) return true
+            if (a < (b-200)) return true
             return Math.abs(a * 1.0 / b - 1) > 0.25
         }
 
